@@ -14,8 +14,8 @@ from auto_ontology.utils.embedding import EmbedParams, batch_embed
 from auto_ontology.utils.model_config import resolve
 from auto_ontology.utils.sample_values import stringify_sample_values
 from auto_ontology.vdb import get_semantic_vdb
-from auto_ontology.vdb.postgres import PostgresVDB
-from auto_ontology.vdb.records import write_embedded_rows
+from auto_ontology.vdb.base import VectorStore
+from auto_ontology.vdb.records import ready_to_write, write_embedded_rows
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class SemanticEmbedder:
 
     database_name: str
     embed_params: EmbedParams
-    vdb: PostgresVDB
+    vdb: VectorStore
 
     def embed_term(
         self,
@@ -51,26 +51,36 @@ class SemanticEmbedder:
 
         ``term`` entries: ``{"name", "description", "id"}``.
         ``attrs`` entries include ``name``, ``term_name``, ``source_column``,
-        ``description``, ``id``, and the owning table metadata.
+        ``column_description``, ``family_prefix``, ``id``, and the owning table
+        metadata.
         ``id`` is the catalog ``id`` (UUID) and, when present, lands
         in the embedded row's metadata.
         Returns the number of rows actually written to the VDB.
         """
+        with_embeddings = self.embed_term_rows(term, attrs)
+        if with_embeddings:
+            write_embedded_rows(self.vdb, with_embeddings)
+        return len(with_embeddings)
+
+    def embed_term_rows(
+        self,
+        term: dict[str, Any],
+        attrs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """The rows :meth:`embed_term` would write, embedded but not written."""
         rows = _build_rows(self.database_name, term, attrs)
         if not rows:
-            return 0
+            return []
 
         embedded_df = batch_embed(rows, self.embed_params)
         if embedded_df is None or embedded_df.empty:
             logger.warning(
                 "Inline embed produced no rows for Term %s", term.get("name")
             )
-            return 0
+            return []
 
         with_embeddings = [
-            row
-            for row in embedded_df.to_dict(orient="records")
-            if (row.get("metadata") or {}).get("embedding")
+            row for row in embedded_df.to_dict(orient="records") if ready_to_write(row)
         ]
         if not with_embeddings:
             logger.warning(
@@ -78,10 +88,7 @@ class SemanticEmbedder:
                 len(rows),
                 term.get("name"),
             )
-            return 0
-
-        write_embedded_rows(self.vdb, with_embeddings)
-        return len(with_embeddings)
+        return with_embeddings
 
     def embed_column_attributes(self, attrs: list[dict[str, Any]]) -> int:
         """Embed only ColumnAttribute rows, without rewriting the parent Term row."""
@@ -168,9 +175,7 @@ def embed_all_semantic_nodes(
         return 0
 
     with_embeddings = [
-        row
-        for row in embedded_df.to_dict(orient="records")
-        if (row.get("metadata") or {}).get("embedding")
+        row for row in embedded_df.to_dict(orient="records") if ready_to_write(row)
     ]
     if not with_embeddings:
         logger.warning(
@@ -242,10 +247,16 @@ def _build_rows(
         if not attr_name:
             continue
         owner = a.get("term_name") or term_name or ""
+        family = a.get("family_prefix")
+        family_suffix = f", family {family}" if family else ""
         sample_block = _format_sample_values(a.get("sample_values"), a.get("datatype"))
+        # The column's description, never the attribute's: the attribute's is
+        # written after FK resolution from its links, and editing it must not
+        # move the vector.
         text = (
-            f"ColumnAttribute: {attr_name} of Term {owner}{synonym_suffix}. "
-            f"{a.get('description') or ''}"
+            f"ColumnAttribute: {attr_name} of Term {owner}{synonym_suffix}"
+            f"{family_suffix}. "
+            f"{a.get('column_description') or ''}"
             f"{sample_block}"
         ).strip()
         path = (

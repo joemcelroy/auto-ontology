@@ -18,7 +18,7 @@ otherwise be discovered by a user:
   database, so there is no scope to match it by -- and a scoped reset silently
   wiping every predictive analysis in the deployment would be worse.
 
-The pgvector side is stubbed. These tests are about which rows the store keeps,
+The vector-store side is stubbed. These tests are about which rows the store keeps,
 and a real embedding round trip would only add a way for them to fail for an
 unrelated reason.
 
@@ -282,6 +282,20 @@ def test_a_sql_attribute_is_scoped_the_same_way(world) -> None:
     assert _exists(s.sql_attribute, crossing)
 
 
+def test_a_term_family_goes_with_its_database(world) -> None:
+    """Deleting the Terms would only cascade the links, leaving empty families."""
+    _, make = world
+    shop, warehouse = make("shop"), make("warehouse")
+    ours = _add(s.term_family, schema_id=shop.schema, prefix="OLD")
+    _link(s.term__term_family, term_id=shop.term("Room"), family_id=ours, base_name="R")
+    theirs = _add(s.term_family, schema_id=warehouse.schema, prefix="OLD")
+
+    r.delete_semantic_layer(shop.name)
+
+    assert not _exists(s.term_family, ours)
+    assert _exists(s.term_family, theirs)
+
+
 def test_a_column_attribute_goes_with_its_table(world) -> None:
     """Owned outright by one table, so no all-or-nothing question arises."""
     _, make = world
@@ -367,7 +381,7 @@ def test_delete_all_data_removes_the_semantic_rows_too(world) -> None:
     assert result.database_name == shop.name
 
 
-def test_the_result_reports_pgvector_rows_from_both_layers(world, stub_vdbs) -> None:
+def test_the_result_reports_vector_rows_from_both_layers(world, stub_vdbs) -> None:
     _, make = world
     shop = make("shop")
 

@@ -4,7 +4,7 @@
 
 [project]
 name = "auto-ontology-server"
-version = "1.1.0"
+version = "1.2.0"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "duckdb>=1.5.5",
@@ -63,6 +63,7 @@ dependencies = [
     # Not imported, but FastAPI refuses to register the model-import upload
     # route without it.
     "python-multipart>=0.0.32",
+    "elasticsearch>=9.5.1",
 ]
 
 [project.optional-dependencies]

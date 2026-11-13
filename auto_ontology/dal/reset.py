@@ -2,7 +2,7 @@
 # All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Per-database reset: drop a database's catalog rows and pgvector embeddings.
+"""Per-database reset: drop a database's catalog rows and vector-store embeddings.
 
 The single source of truth for wiping one database's ingested data.
 
@@ -69,6 +69,7 @@ def _delete_scoped_semantic(database_name: str) -> int:
     "Belonging" is resolved per entity, because each reaches a database by a
     different path:
 
+    * a **TermFamily** through its schema;
     * a **Term** through the tables that represent it;
     * a **ColumnAttribute** through its ``table_id``;
     * a **SqlAttribute** and a **CustomAnalysis** through the tables their SQL
@@ -85,6 +86,25 @@ def _delete_scoped_semantic(database_name: str) -> int:
     """
     tables = _table_ids(database_name)
     deleted = 0
+
+    # TermFamily: scoped by schema. Deleting its Terms only cascades the links,
+    # which would leave the families standing empty.
+    deleted += len(
+        store().query_write(
+            delete(s.term_family)
+            .where(
+                s.term_family.c.schema_id.in_(
+                    select(s.catalog_schema.c.id)
+                    .join(
+                        s.catalog_database,
+                        s.catalog_database.c.id == s.catalog_schema.c.database_id,
+                    )
+                    .where(s.catalog_database.c.name == database_name)
+                )
+            )
+            .returning(s.term_family.c.id)
+        )
+    )
 
     def only_ours(link_table, owner_column, table_column):
         """Rows whose links all land inside this database, and at least one does."""
@@ -172,6 +192,7 @@ def _delete_all_semantic() -> int:
     """
     deleted = 0
     for table in (
+        s.term_family,
         s.term,
         s.column_attribute,
         s.sql_attribute,
@@ -185,12 +206,12 @@ def _delete_all_semantic() -> int:
 
 
 def delete_semantic_layer(database_name: str | None = None) -> int:
-    """Delete semantic rows and their pgvector embeddings. Catalog rows survive.
+    """Delete semantic rows and their vector-store embeddings. Catalog rows survive.
 
     Custom analyses, SQL and predictive alike, are part of what goes: they are
     user-authored, so nothing recompiles them afterwards.
 
-    Returns the number of **pgvector rows** deleted, not database rows — the
+    Returns the number of **vector-store rows** deleted, not database rows — the
     caller reports it as "embeddings removed". The row count is logged.
     """
     with write_transaction():
@@ -215,8 +236,9 @@ def _delete_semantic_rows(database_name: str | None) -> int:
 def _delete_semantic_vectors(database_name: str | None) -> int:
     """The non-transactional half.
 
-    pgvector lives in its own schema behind ``langchain_postgres``, on its own
-    connection, so it cannot join the DAL's transaction. Run after the rows
+    The vector store is reached on its own connection (pgvector through
+    ``langchain_postgres``, or Elasticsearch), so it cannot join the DAL's
+    transaction. Run after the rows
     commit rather than before: a vector whose row is gone is dead weight the
     next embed pass overwrites, whereas a row whose vector is gone is a hit
     retrieval can no longer explain.
@@ -228,7 +250,7 @@ def _delete_semantic_vectors(database_name: str | None) -> int:
         semantic_deleted = len(semantic_vdb.delete_by_database(database_name))
 
     logger.info(
-        "delete_semantic_layer: removed %d semantic pgvector rows for database %s",
+        "delete_semantic_layer: removed %d semantic vector rows for database %s",
         semantic_deleted,
         database_name or "<all>",
     )
@@ -273,9 +295,9 @@ def _delete_orphaned_statements(candidate_ids: list[str] | None = None) -> int:
 
 
 def delete_data_layer(database_name: str | None = None) -> int:
-    """Delete a database's catalog rows and its pgvector embeddings.
+    """Delete a database's catalog rows and its vector-store embeddings.
 
-    Returns the number of pgvector rows deleted. The row deletes run as one
+    Returns the number of vector-store rows deleted. The row deletes run as one
     transaction; the embeddings follow it, for the reason given on
     :func:`_delete_semantic_vectors`.
     """
@@ -298,7 +320,7 @@ def _delete_data_rows(database_name: str | None = None) -> int:
     matches on ``md5(sql_full_query)``, so the next ingest merges into the old
     row and ``total_counter`` accumulates across resets.
 
-    Returns the number of pgvector rows deleted.
+    Returns the number of vector-store rows deleted.
     """
     # The statements this database's tables reference, captured *before* the
     # cascade removes those links — afterwards there is no way back to them.
@@ -349,7 +371,7 @@ def _delete_data_vectors(database_name: str | None) -> int:
         data_deleted = len(data_vdb.delete_by_database(database_name))
 
     logger.info(
-        "delete_data_layer: removed %d data pgvector rows for database %s",
+        "delete_data_layer: removed %d data vector rows for database %s",
         data_deleted,
         database_name or "<all>",
     )
@@ -373,7 +395,7 @@ def delete_all_data(database_name: str | None = None) -> ResetResult:
         _delete_semantic_rows(database_name)
         _delete_data_rows(database_name)
 
-    # Outside the transaction on purpose: pgvector is reached over its own
+    # Outside the transaction on purpose: the vector store is reached over its own
     # connection and cannot be rolled back with the rows. Doing it after the
     # commit means a crash here leaves orphaned vectors, which the next embed
     # pass overwrites -- the tolerable direction of the two.
@@ -386,7 +408,7 @@ def delete_all_data(database_name: str | None = None) -> ResetResult:
         semantic_rows=semantic_rows,
     )
     logger.info(
-        "delete_all_data: removed %d pgvector rows for database %s "
+        "delete_all_data: removed %d vector rows for database %s "
         "(%d data, %d semantic)",
         result.data_rows + result.semantic_rows,
         database_name,
